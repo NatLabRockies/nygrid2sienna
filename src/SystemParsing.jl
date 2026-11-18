@@ -90,7 +90,7 @@ end
 ##########################
 ### ADD InterfaceLimits ##
 ##########################
-df_iflim = CSV.read("config/interfaceflow_limits0718.csv", DataFrame)
+df_iflim = CSV.read("config/interfaceflow_limits.csv", DataFrame)
 df_ifmap = CSV.read("config/interfaceflow_mapping.csv", DataFrame)
 for idx = 1:nrow(df_iflim)
     name = "IF_" * string(idx)
@@ -123,7 +123,10 @@ fuel_mapping = Dict(
 )
 #### Add Thermal #########
 df_thermal = CSV.read("config/thermal_config.csv", DataFrame)
-fuel_cost = CSV.read("Data/fuelPriceWeekly_2019.csv", DataFrame)
+load_year = 2019
+hours = get_timestamp(load_year)
+fuel_cost = CSV.read("Data/fuelPriceWeekly_2019.csv", DataFrame; dateformat=dateformat"mm/dd/yyyy")
+fuel_week = _fuel_week_indices(fuel_cost.TimeStamp, hours)
 for (th_id, th) in enumerate(eachrow(df_thermal))
     name = th.Name
     bus = first(get_components(x -> PSY.get_number(x) == th.BusId, ACBus, sys))
@@ -133,10 +136,13 @@ for (th_id, th) in enumerate(eachrow(df_thermal))
     # if pmin == 0.0
     #     pmin = 0.2 * pmax ## TODO: find better way to estimate pmin
     # end
-    op_cost = _add_thermal_cost(th.HeatRateLM_1, th.HeatRateLM_0, th.Zone, th.FuelType, pmin, fuel_cost)
+    price_column = _fuel_price_column(th.Zone, th.FuelType)
+    startup_fuel_price = maximum(fuel_cost[!, price_column])
+    op_cost = _add_thermal_cost(th.HeatRateLM_1, th.HeatRateLM_0, pmin, startup_fuel_price)
     ramp_rate = th.maxRamp10 / 10.0
     pm = pm_mapping[th.UnitType]
     generator = _add_thermal(sys, bus, name=name, fuel=fuel, cost=op_cost, pmin=pmin, pmax=pmax, ramp_rate=ramp_rate, pm=pm)
+    PSY.set_fuel_cost!(sys, generator, SingleTimeSeries("fuel_cost", TimeArray(hours, fuel_cost[fuel_week, price_column])))
 end
 
 ##  Add Nuclear ##############
@@ -185,24 +191,38 @@ zonename_mapping = Dict(
     "HQ" => "H Q",
 )
 df_agg = CSV.read("config/agggen_config.csv", DataFrame)
-df_hourlylmp = CSV.read("Data/priceHourly_2019.csv", DataFrame)
+df_hourlylmp = CSV.read("Data/priceHourly_2019.csv", DataFrame; dateformat=dateformat"mm/dd/yyyy HH:MM:SS")
+zonal_prices = Dict(zone => _hourly_zonal_prices(df_hourlylmp, label, hours)
+                    for (zone, label) in zonename_mapping)
 for (th_id, th) in enumerate(eachrow(df_agg))
     name = th.Name
     bus = first(get_components(x -> PSY.get_number(x) == th.BusId, ACBus, sys))
     fuel = ThermalFuels.OTHER
     pmin = th.Pmin
-    if name != "Hqimport"
-        pmax = th.Pmax
-    else
-        pmax = th.Pmax
-    end
+    pmax = th.Pmax
     # if pmin == 0.0
     #     pmin = 0.2 * pmax ## TODO: find better way to estimate pmin
     # end
-    filtered_df = filter(row -> row.ZoneName == zonename_mapping[th.Zone], df_hourlylmp)
-    zonal_price = filtered_df[4767, "LBMP"] ###TODO: this needs to be a time-series
+    zonal_price = zonal_prices[th.Zone]
+    if name == "Hqimport"
+        source = PSY.Source(;
+            name=name,
+            available=true,
+            bus=bus,
+            base_power=base_power,
+            active_power_limits=(min=pmin / base_power, max=pmax / base_power),
+        )
+        PSY.add_component!(sys, source)
+        import_offers = [PSY.PiecewiseStepData([0.0, Float64(pmax)], [price]) for price in zonal_price]
+        export_offers = [PSY.PiecewiseStepData([0.0, Float64(-pmin)], [price]) for price in zonal_price]
+        PSY.set_import_variable_cost!(sys, source,
+            SingleTimeSeries("import_offer", TimeArray(hours, import_offers)), PSY.UnitSystem.NATURAL_UNITS)
+        PSY.set_export_variable_cost!(sys, source,
+            SingleTimeSeries("export_offer", TimeArray(hours, export_offers)), PSY.UnitSystem.NATURAL_UNITS)
+        continue
+    end
     op_cost = ThermalGenerationCost(;
-        variable=FuelCurve(; value_curve=LinearCurve(zonal_price), fuel_cost=1.0),
+        variable=FuelCurve(; value_curve=LinearCurve(1.0), fuel_cost=1.0),
         fixed=0.0,
         start_up=0.0,
         shut_down=0.0,
@@ -210,13 +230,13 @@ for (th_id, th) in enumerate(eachrow(df_agg))
     ramp_rate = th.maxRampAgc
     pm = PrimeMovers.OT
     generator = _add_thermal(sys, bus, name=name, fuel=fuel, cost=op_cost, pmin=pmin, pmax=pmax, ramp_rate=ramp_rate, pm=pm)
+    PSY.set_fuel_cost!(sys, generator, SingleTimeSeries("fuel_cost", TimeArray(hours, zonal_price)))
 end
 
 ##########################
 ### ADD Loads ############
 ##########################
 load_profile = CSV.read("Data/load_profiles.csv", DataFrame)
-load_year = 2019
 for busid in names(load_profile)
 
     bus = first(get_components(x -> PSY.get_number(x) == parse(Float64, busid), ACBus, sys))

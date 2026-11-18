@@ -1,10 +1,11 @@
-using PRASInterface
+using PowerSystems
+using SiennaPRASInterface
 
-sys = System("nys2019.json")
+const PSY = PowerSystems
+sys = PSY.System("nys2019.json")
 
-sequential_monte_carlo = PRAS.SequentialMonteCarlo(samples=2, seed=1)
-shortfalls, = PRAS.assess(sys, PSY.Area, sequential_monte_carlo, PRAS.Shortfall())
+sequential_monte_carlo = SequentialMonteCarlo(samples=2, seed=1)
+shortfalls, = assess(sys, PSY.Area, sequential_monte_carlo, Shortfall())
 
-
-lole = PRAS.LOLE(shortfalls)
-eue = PRAS.EUE(shortfalls)
+lole = LOLE(shortfalls)
+eue = EUE(shortfalls)

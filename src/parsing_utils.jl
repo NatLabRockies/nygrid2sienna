@@ -9,6 +9,7 @@ function _build_bus(sys, number, name, bustype, angle, magnitude, voltage_limits
     bus = PSY.ACBus(
         number=number,
         name=name,
+        available=true,
         bustype=bustype,
         angle=angle,
         magnitude=magnitude,
@@ -50,6 +51,7 @@ function _build_transformers(sys; frombus::PSY.ACBus, tobus::PSY.ACBus, name, r,
         x=x,
         primary_shunt=b,
         rating=rating / 100.0,
+        base_power=base_power,
     )
     PSY.add_component!(sys, device)
     return device
@@ -58,7 +60,7 @@ end
 
 function _build_hvdc(sys; frombus::PSY.ACBus, tobus::PSY.ACBus, name, r, x, b, rating)
     # Create a new storage device of the specified type
-    device = PSY.TwoTerminalHVDCLine(
+    device = PSY.TwoTerminalGenericHVDCLine(
         name=name,
         available=true,
         active_power_flow=rating / base_power,
@@ -126,40 +128,45 @@ function _add_thermal(
     return device  # Return the newly created component
 end
 
-function _add_thermal_cost(heatrate1, heatrate0, zone, fuel, pmin, fuel_table)
-    heat_rate_curve = LinearCurve(heatrate1, heatrate0)
-    priceTable = fuel_table[29, :] #TODO: Selecting the first week's fuel price now
-    fuelPrice = 0.0
+function _fuel_price_column(zone, fuel)
     if fuel == "Coal"
-        fuelPrice = priceTable["coal_NY"]
+        return "coal_NY"
     elseif fuel == "Natural Gas"
-        fuelPrice = priceTable["NG_A2E"]
-        if zone in ["F", "G", "H", "I"]
-            fuelPrice = priceTable["NG_F2I"]
-        end
-        if zone == "K"
-            fuelPrice = priceTable["NG_J"]
-        end
-        if zone == "J"
-            fuelPrice = priceTable["NG_K"]
-        end
+        zone in ("F", "G", "H", "I") && return "NG_F2I"
+        zone == "J" && return "NG_J"
+        zone == "K" && return "NG_K"
+        return "NG_A2E"
     elseif fuel == "Fuel Oil 2" || fuel == "Kerosene"
-        if zone in ["F", "G", "H", "I"]
-            fuelPrice = priceTable["FO2_DSNY"]
-        else
-            fuelPrice = priceTable["FO2_UPNY"]
-        end
+        return zone in ("F", "G", "H", "I", "J", "K") ? "FO2_DSNY" : "FO2_UPNY"
     elseif fuel == "Fuel Oil 6"
-        if zone in ["F", "G", "H", "I"]
-            fuelPrice = priceTable["FO6_DSNY"]
-        else
-            fuelPrice = priceTable["FO6_UPNY"]
-        end
-    else
-        error("Error: Undefined fuel type!")
+        return zone in ("F", "G", "H", "I", "J", "K") ? "FO6_DSNY" : "FO6_UPNY"
     end
-    fuel_cost = fuelPrice
-    fuel_curve = FuelCurve(; value_curve=heat_rate_curve, fuel_cost=fuel_cost)
+    throw(ArgumentError("Unsupported thermal fuel: $fuel"))
+end
+
+function _fuel_week_indices(week_starts, hours)
+    issorted(week_starts) && allunique(week_starts) ||
+        throw(ArgumentError("Weekly fuel price dates must be sorted and unique"))
+    return map(hours) do hour
+        day = Date(hour)
+        i = searchsortedlast(week_starts, day)
+        i > 0 && day < week_starts[i] + Day(7) ||
+            throw(ArgumentError("Missing weekly fuel price for $day"))
+        i
+    end
+end
+
+function _hourly_zonal_prices(price_table, zone, hours)
+    rows = sort(filter(row -> row.ZoneName == zone &&
+                             first(hours) <= row.TimeStamp <= last(hours), price_table),
+                :TimeStamp)
+    rows.TimeStamp == collect(hours) ||
+        throw(ArgumentError("LBMP for $zone must contain exactly one price per modeled hour"))
+    return rows.LBMP
+end
+
+function _add_thermal_cost(heatrate1, heatrate0, pmin, fuel_cost)
+    fuel_curve = FuelCurve(; value_curve=LinearCurve(heatrate1, heatrate0), fuel_cost=fuel_cost)
     startup_cost = pmin * heatrate1 * fuel_cost
     op_cost = ThermalGenerationCost(;
         variable=fuel_curve,
@@ -367,59 +374,32 @@ end
 
 #Function builds a load component in the power system. it takes arugments such as system, bus, name, load_ts and load_eyear, 
 function _build_load(sys, bus::PSY.Bus, name, load_ts, load_year)
+    min_load, max_load = extrema(load_ts)
+    # Keep the sign of the largest-magnitude value to avoid a near-zero divisor.
+    scale = abs(min_load) > abs(max_load) ? min_load : max_load
+    normalized_load = load_ts ./ (iszero(scale) ? 1.0 : scale)
 
-    if maximum(load_ts) == 0.0
-        maxload = minimum(load_ts) / base_power
-    else
-        maxload = maximum(load_ts) / base_power
-    end
-    # Create a new load component with the specified parameters
     load = PSY.StandardLoad(
-        name=name,                         # Set the name for the new component
-        available=true,                    # Mark the component as available
-        bus=bus,                           # Assign the bus to the component
-        base_power=100.0,                  # Base power of the load component (in kW)
-        max_constant_active_power=maxload,  # Maximum constant active power of the load component (scaled from the maximum of the load time series)
+        name=name,
+        available=true,
+        bus=bus,
+        base_power=100.0,
+        max_constant_active_power=scale / base_power,
     )
 
     # Add the load component to the power system model
     add_component!(sys, load)
 
     ### The issue was that the name of the time series and the name in the renewable config doesn't match. Now they matched but we should think about how to name things later to make it easier to track.
-    # Add a time series for the load, scaling the load based on the maximum active power specified by the time series
-    #=
     PSY.add_time_series!(
         sys,
         load,
         PSY.SingleTimeSeries(
-            "max_active_power",  # Name of the time series for the maximum active power
-            TimeArray(get_timestamp(load_year), load_ts);  # Time series data for the load
-            scaling_factor_multiplier=PSY.get_max_active_power,  # Scaling factor based on the maximum active power
+            "max_active_power",
+            TimeArray(get_timestamp(load_year), normalized_load);
+            scaling_factor_multiplier=PSY.get_max_active_power,
         ),
     )
-
-    =#
-    if maximum(load_ts) == 0.0
-        PSY.add_time_series!(
-            sys,
-            load,
-            PSY.SingleTimeSeries(
-                "max_active_power",
-                TimeArray(get_timestamp(load_year), load_ts / minimum(load_ts)),
-                scaling_factor_multiplier=PSY.get_max_active_power,
-            )
-        )
-    else
-        PSY.add_time_series!(
-            sys,
-            load,
-            PSY.SingleTimeSeries(
-                "max_active_power",
-                TimeArray(get_timestamp(load_year), load_ts / maximum(load_ts)),
-                scaling_factor_multiplier=PSY.get_max_active_power,
-            )
-        )
-    end
 
     return load  # Return the newly created load component
 end

@@ -23,30 +23,34 @@
             "count": 57
         },
         {
+            "type": "Source",
+            "count": 1
+        },
+        {
             "type": "StandardLoad",
             "count": 57
         },
         {
             "type": "ThermalStandard",
-            "count": 271
+            "count": 270
         },
         {
             "type": "Transformer2W",
-            "count": 35
+            "count": 37
         },
         {
             "type": "TransmissionInterface",
             "count": 11
         },
         {
-            "type": "TwoTerminalHVDCLine",
+            "type": "TwoTerminalGenericHVDCLine",
             "count": 4
         }
     ],
     "time_series_counts": [
         {
             "type": "SingleTimeSeries",
-            "count": 57
+            "count": 313
         }
     ]
 }
