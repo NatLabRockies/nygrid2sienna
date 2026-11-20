@@ -34,6 +34,12 @@ Manifest.toml
 ## .mat
 *.mat
 *.lp
-.html
+*.html
+
+# Generated PowerSystems logs and serialized systems
+power-systems.log
+/historical_2019*.json
+/nys[0-9]*.json
+/*_time_series_storage.h5
 
 TestRun/*

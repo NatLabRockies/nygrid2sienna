@@ -2,7 +2,7 @@ using PowerSystems
 using SiennaPRASInterface
 
 const PSY = PowerSystems
-sys = PSY.System("nys2019.json")
+sys = PSY.System("historical_2019.json")
 
 sequential_monte_carlo = SequentialMonteCarlo(samples=2, seed=1)
 shortfalls, = assess(sys, PSY.Area, sequential_monte_carlo, Shortfall())

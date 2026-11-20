@@ -25,7 +25,7 @@ sim_name = "test_case"
 output_dir = "TestRun"
 interval = 24
 horizon = 48
-steps = 364
+steps = 10
 
 # Check if the output directory exists, create if not
 if !ispath(output_dir)
@@ -41,8 +41,10 @@ solver = optimizer_with_attributes(
 )
 
 if !@isdefined(sys)
-    @info "Loading system from nys2019.json"
-    sys = PSY.System("nys2019.json")
+    system_file = length(ARGS) == 1 && endswith(ARGS[1], ".json") ?
+        ARGS[1] : _scenario_settings(ARGS).system_file
+    @info "Loading system" system_file
+    sys = PSY.System(system_file)
 end
 
 # Transform time series data for the specified horizon and interval
@@ -62,12 +64,13 @@ if !isnothing(PSY.get_component(PSY.Source, sys, "Hqimport"))
     ))
 end
 set_device_model!(template_uc, StandardLoad, StaticPowerLoad)
-# set_device_model!(template_uc, GenericBattery, StorageDispatchWithReserves)
+set_device_model!(template_uc, EnergyReservoirStorage, StorageDispatchWithReserves)
 set_device_model!(template_uc, Transformer2W, StaticBranch)
 set_device_model!(template_uc, Line, StaticBranch)
 set_device_model!(template_uc, TwoTerminalGenericHVDCLine, HVDCTwoTerminalLossless)
-# set_device_model!(template_uc, HydroDispatch, HydroDispatchRunOfRiver)
-# set_device_model!(template_uc, RenewableDispatch, RenewableFullDispatch)
+set_device_model!(template_uc, HydroDispatch, HydroDispatchRunOfRiver)
+set_device_model!(template_uc, RenewableDispatch, RenewableFullDispatch)
+set_device_model!(template_uc, RenewableNonDispatch, FixedOutput)
 set_service_model!(template_uc, TransmissionInterface, ConstantMaxInterfaceFlow)
 
 # Create simulation models
@@ -97,7 +100,7 @@ sim = Simulation(
     models=models,
     sequence=sequence,
     simulation_folder=output_dir,
-    # initial_time=DateTime("2019-07-18T14:00:00")
+    initial_time=DateTime("2019-07-18T00:00:00")
 )
 
 # Build and execute the simulation
@@ -106,7 +109,7 @@ execute!(sim, enable_progress_bar=true)
 
 model = get_simulation_model(sim, :UC)
 JuMP.write_to_file(model.internal.container.JuMPmodel, "model.lp")
-results = SimulationResults(sim; ignore_status=true);
+results = SimulationResults(sim);
 results_uc = get_decision_problem_results(results, "UC");
 set_system!(results_uc, sys);
 variables = PSI.read_realized_variables(results_uc)

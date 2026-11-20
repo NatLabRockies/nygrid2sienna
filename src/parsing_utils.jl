@@ -4,6 +4,42 @@ const PSY = PowerSystems
 #Function to generate a time array with hourly timestamps for a given year
 get_timestamp(year) = DateTime("$(year)-01-01T00:00:00"):Hour(1):DateTime("$(year)-12-31T23:55:00")
 
+function _scenario_settings(args)
+    any(arg -> startswith(arg, "--"), args) &&
+        throw(ArgumentError("Load scales must be specified in the scenario CSV, not as command-line flags"))
+    positional = args
+    length(positional) <= 3 ||
+        throw(ArgumentError("Usage: historical-2019 OR future_year [weather_year] scenario.csv"))
+    scenario = isempty(positional) ? "historical-2019" : positional[1]
+    scenario == "2019" && (scenario = "historical-2019")
+    scenario_year = scenario == "historical-2019" ? nothing : tryparse(Int, scenario)
+    scenario != "historical-2019" && (isnothing(scenario_year) || scenario_year < 2030) &&
+        throw(ArgumentError("Scenario must be historical-2019 or a future year of 2030 or later"))
+    scenario == "historical-2019" && length(positional) > 1 &&
+        throw(ArgumentError("Weather year and scenario CSV are only supported for future scenarios"))
+    scenario != "historical-2019" && length(positional) < 2 &&
+        throw(ArgumentError("A scenario CSV is required: future_year [weather_year] scenario.csv"))
+    weather_year = length(positional) == 3 ? tryparse(Int, positional[2]) : 2019
+    isnothing(weather_year) && throw(ArgumentError("Weather year must be an integer"))
+    scenario != "historical-2019" && !(1998 <= weather_year <= 2019) &&
+        throw(ArgumentError("Future scenarios have weather profiles for 1998 through 2019"))
+    capacity_csv = if scenario == "historical-2019"
+        nothing
+    else
+        input = positional[end]
+        endswith(lowercase(input), ".csv") ||
+            throw(ArgumentError("A scenario CSV is required: future_year [weather_year] scenario.csv"))
+        input
+    end
+    suffix = scenario != "historical-2019" ?
+        "_" * replace(splitext(basename(capacity_csv))[1], r"[^A-Za-z0-9_-]" => "_") : ""
+    system_file = scenario == "historical-2019" ? "historical_2019.json" :
+        "nys$(scenario)_$(weather_year)$(suffix).json"
+    interface_limits_file = scenario == "historical-2019" ? "interfaceflow_limits.csv" :
+        scenario_year < 2040 ? "interfaceflow_limits_2030.csv" : "interfaceflow_limits_2040.csv"
+    return (; scenario, weather_year, capacity_csv, system_file, interface_limits_file)
+end
+
 
 function _build_bus(sys, number, name, bustype, angle, magnitude, voltage_limits, base_voltage, area)
     bus = PSY.ACBus(
@@ -103,10 +139,11 @@ function _add_thermal(
     ramp_rate,
     cost::PSY.OperationalCost,
     pm::PSY.PrimeMovers,
+    available=true,
 )
     device = PSY.ThermalStandard(
         name=name,
-        available=true,
+        available=available,
         status=true,
         bus=bus,
         active_power=0.0,
